@@ -673,6 +673,11 @@ static void UpdateQuotaToolTip(ToolTip const& toolTip, std::wstring const& tip, 
                 labelEnd = 11;
                 labelBold = true;
                 quotaLine = true;
+            } else if (line.rfind(L"overage:", 0) == 0) {
+                labelBrush = quotaLabel;
+                labelEnd = 8;
+                labelBold = true;
+                quotaLine = true;
             } else if (line.rfind(L"chat:", 0) == 0) {
                 labelBrush = quotaLabel;
                 labelEnd = 5;
@@ -2545,6 +2550,21 @@ static bool ParseGitHubCopilotUsage(const std::string& body, AccountData* d,
                                                         : completionsUsage.detail);
         }
 
+        // Paid additional usage is separate from the user's entitlement/budget. Surface the
+        // provider's overage counter whenever the account policy permits overage, including
+        // an explicit zero so the tooltip distinguishes "allowed, unused" from "not allowed".
+        if (auto premiumSnapshot = GetObj(snapshots, L"premium_interactions");
+            premiumSnapshot && GetBool(premiumSnapshot, L"overage_permitted")) {
+            double overageCount = GetNum(premiumSnapshot, L"overage_count", 0);
+            wchar_t line[80];
+            swprintf(line, ARRAYSIZE(line),
+                     tokenBasedBilling ? L"overage: %.0f AI credits"
+                                       : L"overage: %.0f requests",
+                     std::max(0.0, overageCount));
+            if (!d->extraLines.empty()) d->extraLines += L"\n";
+            d->extraLines += line;
+        }
+
         bool parsed = premium || chat || completions;
         if (!parsed && error) {
             *error = L"unexpected response format (no usable Copilot quota)";
@@ -4073,8 +4093,8 @@ static Grid BuildQuotaGrid(QuotaUiInstance& state) {
                         bool trackingHover = wasOpen || refs.reopenToolTipOnMove ||
                                              refs.manualToolTipOpen;
                         if (trackingHover && refs.hasToolTipOpenCursor && haveCursor &&
-                            std::abs(cursor.x - refs.toolTipOpenCursor.x) < toolTipMoveThresholdX &&
-                            std::abs(cursor.y - refs.toolTipOpenCursor.y) < toolTipMoveThresholdY) {
+                            std::abs(cursor.x - refs.toolTipOpenCursor.x) < long(toolTipMoveThresholdX) &&
+                            std::abs(cursor.y - refs.toolTipOpenCursor.y) < long(toolTipMoveThresholdY)) {
                             return;
                         }
                         if (refs.manualToolTipTimer) refs.manualToolTipTimer.Stop();
