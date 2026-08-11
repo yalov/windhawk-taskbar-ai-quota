@@ -58,6 +58,10 @@ the right-click menu):
 For Anthropic, OpenAI, and GitHub Copilot, the mod owns its sign-in token. Tokens are stored
 encrypted (Windows DPAPI). Use **Sign out** to remove a stored token.
 
+The optional **Use GitHub CLI for organization billing** setting is separate from Copilot
+sign-in. It runs the installed `gh` CLI with its existing login to read current-month
+organization `discountAmount` and `netAmount`; organization administrator access is required.
+
 GitHub documents the device sign-in flow, but its personal Copilot quota endpoint is internal
 and may change without notice.
 
@@ -154,9 +158,18 @@ Have a suggestion or found a bug?
 - percentFontSize: 9
   $name: Percent font size (px)
   $description: 'Default: 9. Font size for compact percentage text over the bars.'
+- colorTheme: default
+  $name: Color theme
+  $description: 'Default: Default. Default uses darker green/yellow/orange/red bars with white text on a dark taskbar, and brighter bars with dark text on a light taskbar. Monochrome uses translucent white bars/text on dark or translucent black bars/text on light.'
+  $options:
+    - default: Default colors
+    - monochrome: Monochrome
 - showCodexSparkInTooltip: false
   $name: Show Codex Spark in tooltip
   $description: 'Default: false. Shows OpenAI/Codex Spark plan and rate-limit lines in tooltips.'
+- useGitHubCliForOrganizationBilling: false
+  $name: Use GitHub CLI for organization billing
+  $description: 'Default: false. For GitHub Copilot, uses the installed gh CLI and its existing login to show current-month organization discountAmount and netAmount. Requires organization administrator access. The first Copilot organization returned by GitHub is used.'
 - yellowThreshold: 50
   $name: Yellow threshold (%)
   $description: 'Default: 50. Usage below this stays green.'
@@ -268,12 +281,18 @@ enum class BarMode {
     Remaining,
 };
 
+enum class ColorTheme {
+    Default,
+    Monochrome,
+};
+
 struct Settings {
     std::vector<AccountConfig> accounts;
     TaskbarMonitorMode taskbarMonitorMode = TaskbarMonitorMode::Primary;
     ClickAction clickAction = ClickAction::Refresh;
     BarLayout barLayout = BarLayout::Stacked;
     BarMode barMode = BarMode::Used;
+    ColorTheme colorTheme = ColorTheme::Default;
     int taskbarMonitorNumber = 1;
     int pollMinutes = 10;
     int barLength = 100;
@@ -292,6 +311,7 @@ struct Settings {
     bool showPercentText = false;
     bool hideUnavailableBars = true;
     bool showCodexSparkInTooltip = false;
+    bool useGitHubCliForOrganizationBilling = false;
     bool colorblindMode = false;
     bool showStaleWarning = true;
     bool enableNotifications = true;
@@ -321,6 +341,8 @@ struct AccountData {
 struct AppliedState {
     int fillPx[2] = {-1, -1};
     uint32_t fillColor[2] = {0, 0};
+    uint32_t percentColor = 0;
+    uint32_t trackColor = 0;
     int barVisible[2] = {-1, -1};
     std::wstring tip;
     std::wstring percentText;
@@ -569,20 +591,50 @@ static std::wstring FormatUpdated(ULONGLONG unixMs, bool stale) {
 
 static winrt::Windows::UI::Color UsageColor(double pct, bool stale, int yellowThreshold,
                                             int orangeThreshold, int redThreshold,
-                                            bool colorblindMode) {
-    if (stale || pct < 0) return {255, 0x9E, 0x9E, 0x9E};
+                                            bool colorblindMode, bool lightTheme) {
+    if (stale || pct < 0) {
+        return lightTheme ? winrt::Windows::UI::Color{255, 0x9E, 0x9E, 0x9E}
+                          : winrt::Windows::UI::Color{255, 0x61, 0x61, 0x61};
+    }
 
     if (colorblindMode) {
+        if (!lightTheme) {
+            if (pct >= redThreshold) return {255, 0xA6, 0x47, 0x00};
+            if (pct >= orangeThreshold) return {255, 0x7A, 0x65, 0x00};
+            if (pct >= yellowThreshold) return {255, 0x1B, 0x67, 0x7F};
+            return {255, 0x00, 0x5A, 0x8C};
+        }
         if (pct >= redThreshold) return {255, 0xD5, 0x5E, 0x00};
         if (pct >= orangeThreshold) return {255, 0xE6, 0x9F, 0x00};
         if (pct >= yellowThreshold) return {255, 0x56, 0xB4, 0xE9};
         return {255, 0x00, 0x72, 0xB2};
     }
 
+    if (!lightTheme) {
+        if (pct >= redThreshold) return {255, 0xB7, 0x1C, 0x1C};
+        if (pct >= orangeThreshold) return {255, 0xB3, 0x47, 0x00};
+        if (pct >= yellowThreshold) return {255, 0x7A, 0x65, 0x00};
+        return {255, 0x2E, 0x7D, 0x32};
+    }
+
     if (pct >= redThreshold) return {255, 0xE5, 0x39, 0x35};
     if (pct >= orangeThreshold) return {255, 0xFB, 0x8C, 0x00};
     if (pct >= yellowThreshold) return {255, 0xFD, 0xD8, 0x35};
     return {255, 0x43, 0xA0, 0x47};
+}
+
+static winrt::Windows::UI::Color MonochromeBarColor(bool lightTheme, bool stale) {
+    uint8_t alpha = stale ? 0x48 : 0x60;
+    return lightTheme ? winrt::Windows::UI::Color{alpha, 0, 0, 0}
+                      : winrt::Windows::UI::Color{alpha, 0xFF, 0xFF, 0xFF};
+}
+
+static winrt::Windows::UI::Color TrackColor(ColorTheme colorTheme, bool lightTheme) {
+    if (colorTheme == ColorTheme::Monochrome) {
+        return lightTheme ? winrt::Windows::UI::Color{0x20, 0, 0, 0}
+                          : winrt::Windows::UI::Color{0x20, 0xFF, 0xFF, 0xFF};
+    }
+    return {0x46, 0x80, 0x80, 0x80};
 }
 
 static void UpdateQuotaToolTip(ToolTip const& toolTip, std::wstring const& tip, bool hasError) {
@@ -711,6 +763,12 @@ static void UpdateQuotaToolTip(ToolTip const& toolTip, std::wstring const& tip, 
                 labelEnd = 12;
                 labelBold = true;
                 quotaLine = true;
+            } else if (line.rfind(L"organization:", 0) == 0) {
+                bool unavailable = line.find(L"unavailable", 13) != std::wstring::npos;
+                labelBrush = unavailable ? metadata : creditLabel;
+                labelEnd = 13;
+                labelBold = true;
+                metadataLine = unavailable;
             } else if (line.rfind(L"updated:", 0) == 0) {
                 // Timestamp and click action are informational metadata, not quota data.
                 labelBrush = metadata;
@@ -2576,6 +2634,318 @@ static bool ParseGitHubCopilotUsage(const std::string& body, AccountData* d,
     }
 }
 
+static void AppendExtraLine(AccountData* d, const std::wstring& line) {
+    if (!d || line.empty()) return;
+    if (!d->extraLines.empty()) d->extraLines += L"\n";
+    d->extraLines += line;
+}
+
+static bool IsValidGitHubLogin(const std::wstring& login) {
+    if (login.empty() || login.size() > 100) return false;
+    for (wchar_t ch : login) {
+        if (!((ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') ||
+              (ch >= L'0' && ch <= L'9') || ch == L'-')) {
+            return false;
+        }
+    }
+    return login.front() != L'-' && login.back() != L'-';
+}
+
+static std::wstring GetFirstGitHubCopilotOrganization(const std::string& body) {
+    try {
+        auto root = JsonObject::Parse(Utf8ToWide(body));
+        if (root.HasKey(L"organization_login_list")) {
+            auto value = root.GetNamedValue(L"organization_login_list");
+            if (value.ValueType() == JsonValueType::Array) {
+                auto organizations = value.GetArray();
+                for (uint32_t i = 0; i < organizations.Size(); i++) {
+                    auto item = organizations.GetAt(i);
+                    if (item.ValueType() != JsonValueType::String) continue;
+                    std::wstring login = item.GetString().c_str();
+                    if (IsValidGitHubLogin(login)) return login;
+                }
+            }
+        }
+
+        if (root.HasKey(L"organization_list")) {
+            auto value = root.GetNamedValue(L"organization_list");
+            if (value.ValueType() == JsonValueType::Array) {
+                auto organizations = value.GetArray();
+                for (uint32_t i = 0; i < organizations.Size(); i++) {
+                    auto item = organizations.GetAt(i);
+                    if (item.ValueType() != JsonValueType::Object) continue;
+                    std::wstring login = GetStr(item.GetObject(), L"login");
+                    if (IsValidGitHubLogin(login)) return login;
+                }
+            }
+        }
+    } catch (...) {
+    }
+    return {};
+}
+
+static bool IsRegularFile(const std::wstring& path) {
+    DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static std::wstring GetEnvironmentPath(PCWSTR name) {
+    std::vector<wchar_t> buffer(32768);
+    DWORD length = GetEnvironmentVariableW(name, buffer.data(), (DWORD)buffer.size());
+    if (!length || length >= buffer.size()) return {};
+    return std::wstring(buffer.data(), length);
+}
+
+static std::wstring FindGitHubCliPath() {
+    std::vector<std::wstring> candidates;
+    if (std::wstring programFiles = GetEnvironmentPath(L"ProgramFiles");
+        !programFiles.empty()) {
+        candidates.push_back(programFiles + L"\\GitHub CLI\\gh.exe");
+    }
+    if (std::wstring localAppData = GetEnvironmentPath(L"LOCALAPPDATA");
+        !localAppData.empty()) {
+        candidates.push_back(localAppData + L"\\Programs\\GitHub CLI\\gh.exe");
+        candidates.push_back(localAppData + L"\\Microsoft\\WinGet\\Links\\gh.exe");
+    }
+    for (const auto& candidate : candidates) {
+        if (IsRegularFile(candidate)) return candidate;
+    }
+
+    std::vector<wchar_t> path(32768);
+    DWORD length = SearchPathW(nullptr, L"gh.exe", nullptr, (DWORD)path.size(),
+                               path.data(), nullptr);
+    if (length && length < path.size() && IsRegularFile(path.data())) {
+        return std::wstring(path.data(), length);
+    }
+    return {};
+}
+
+// Quote one argument according to CommandLineToArgvW's backslash/quote rules.
+static std::wstring QuoteProcessArgument(const std::wstring& argument) {
+    std::wstring result = L"\"";
+    size_t backslashes = 0;
+    for (wchar_t ch : argument) {
+        if (ch == L'\\') {
+            backslashes++;
+            continue;
+        }
+        if (ch == L'\"') {
+            result.append(backslashes * 2 + 1, L'\\');
+            result.push_back(ch);
+        } else {
+            result.append(backslashes, L'\\');
+            result.push_back(ch);
+        }
+        backslashes = 0;
+    }
+    result.append(backslashes * 2, L'\\');
+    result.push_back(L'\"');
+    return result;
+}
+
+static bool RunGitHubCliBillingQuery(const std::wstring& organization,
+                                     double* discountAmount, double* netAmount,
+                                     std::wstring* error) {
+    if (g_unloading || !discountAmount || !netAmount) return false;
+
+    std::wstring ghPath = FindGitHubCliPath();
+    if (ghPath.empty()) {
+        if (error) *error = L"gh not found";
+        return false;
+    }
+
+    std::wstring apiPath = L"/organizations/" + organization +
+                           L"/settings/billing/ai_credit/usage";
+    std::vector<std::wstring> arguments{
+        ghPath,
+        L"api",
+        apiPath,
+        L"--hostname",
+        L"github.com",
+        L"--header",
+        L"X-GitHub-Api-Version: 2026-03-10",
+        L"--jq",
+        L"{discountAmount: ([.usageItems[]? | (.discountAmount // 0)] | add // 0), netAmount: ([.usageItems[]? | (.netAmount // 0)] | add // 0)}",
+    };
+    std::wstring commandLine;
+    for (const auto& argument : arguments) {
+        if (!commandLine.empty()) commandLine.push_back(L' ');
+        commandLine += QuoteProcessArgument(argument);
+    }
+    std::vector<wchar_t> mutableCommandLine(commandLine.begin(), commandLine.end());
+    mutableCommandLine.push_back(L'\0');
+
+    SECURITY_ATTRIBUTES securityAttributes{};
+    securityAttributes.nLength = sizeof(securityAttributes);
+    securityAttributes.bInheritHandle = TRUE;
+
+    HANDLE outputRead = nullptr;
+    HANDLE outputWrite = nullptr;
+    if (!CreatePipe(&outputRead, &outputWrite, &securityAttributes, 0) ||
+        !SetHandleInformation(outputRead, HANDLE_FLAG_INHERIT, 0)) {
+        if (outputRead) CloseHandle(outputRead);
+        if (outputWrite) CloseHandle(outputWrite);
+        if (error) *error = L"could not create gh output pipe";
+        return false;
+    }
+
+    HANDLE nullInput = CreateFileW(L"NUL", GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, &securityAttributes, OPEN_EXISTING, 0, nullptr);
+    HANDLE nullOutput = CreateFileW(L"NUL", GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, &securityAttributes, OPEN_EXISTING, 0, nullptr);
+    if (nullInput == INVALID_HANDLE_VALUE || nullOutput == INVALID_HANDLE_VALUE) {
+        if (nullInput != INVALID_HANDLE_VALUE) CloseHandle(nullInput);
+        if (nullOutput != INVALID_HANDLE_VALUE) CloseHandle(nullOutput);
+        CloseHandle(outputRead);
+        CloseHandle(outputWrite);
+        if (error) *error = L"could not prepare gh process";
+        return false;
+    }
+
+    STARTUPINFOEXW startup{};
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    startup.StartupInfo.wShowWindow = SW_HIDE;
+    startup.StartupInfo.hStdInput = nullInput;
+    startup.StartupInfo.hStdOutput = outputWrite;
+    startup.StartupInfo.hStdError = nullOutput;
+
+    SIZE_T attributeListSize = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeListSize);
+    std::vector<BYTE> attributeListStorage(attributeListSize);
+    startup.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
+        attributeListStorage.data());
+    bool attributeListInitialized = InitializeProcThreadAttributeList(
+        startup.lpAttributeList, 1, 0, &attributeListSize) != FALSE;
+    bool attributeListReady = attributeListInitialized;
+    HANDLE inheritedHandles[] = {nullInput, outputWrite, nullOutput};
+    if (attributeListReady) {
+        attributeListReady = UpdateProcThreadAttribute(
+            startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            inheritedHandles, sizeof(inheritedHandles), nullptr, nullptr) != FALSE;
+    }
+
+    PROCESS_INFORMATION process{};
+    BOOL created = FALSE;
+    if (attributeListReady) {
+        created = CreateProcessW(
+            ghPath.c_str(), mutableCommandLine.data(), nullptr, nullptr, TRUE,
+            CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+            &startup.StartupInfo, &process);
+    }
+    if (attributeListInitialized) {
+        DeleteProcThreadAttributeList(startup.lpAttributeList);
+    }
+    CloseHandle(nullInput);
+    CloseHandle(nullOutput);
+    CloseHandle(outputWrite);
+
+    if (!created) {
+        CloseHandle(outputRead);
+        if (error) *error = L"could not start gh";
+        return false;
+    }
+
+    constexpr size_t kMaxOutputBytes = 256 * 1024;
+    std::string output;
+    bool outputTooLarge = false;
+    auto drainOutput = [&]() {
+        for (;;) {
+            DWORD available = 0;
+            if (!PeekNamedPipe(outputRead, nullptr, 0, nullptr, &available, nullptr) ||
+                available == 0) {
+                break;
+            }
+            if (output.size() + available > kMaxOutputBytes) {
+                outputTooLarge = true;
+                break;
+            }
+            char buffer[4096];
+            DWORD read = 0;
+            DWORD requested = std::min<DWORD>(available, sizeof(buffer));
+            if (!ReadFile(outputRead, buffer, requested, &read, nullptr) || !read) break;
+            output.append(buffer, read);
+        }
+    };
+
+    ULONGLONG startedAt = GetTickCount64();
+    bool cancelled = false;
+    for (;;) {
+        drainOutput();
+        DWORD wait = WaitForSingleObject(process.hProcess, 50);
+        if (wait == WAIT_OBJECT_0) break;
+        if (wait == WAIT_FAILED || g_unloading || outputTooLarge ||
+            GetTickCount64() - startedAt >= 20000) {
+            cancelled = true;
+            TerminateProcess(process.hProcess, ERROR_CANCELLED);
+            WaitForSingleObject(process.hProcess, 1000);
+            break;
+        }
+    }
+    drainOutput();
+
+    DWORD exitCode = ERROR_CANCELLED;
+    GetExitCodeProcess(process.hProcess, &exitCode);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    CloseHandle(outputRead);
+
+    if (cancelled || exitCode != 0) {
+        Wh_Log(L"GitHub CLI organization billing query failed for %s (exit %lu)",
+               organization.c_str(), exitCode);
+        if (error) {
+            *error = outputTooLarge ? L"gh output was too large"
+                                    : L"gh request failed";
+        }
+        return false;
+    }
+
+    try {
+        auto result = JsonObject::Parse(Utf8ToWide(output));
+        double discount = GetNum(result, L"discountAmount", -1);
+        double net = GetNum(result, L"netAmount", -1);
+        if (!std::isfinite(discount) || !std::isfinite(net) ||
+            discount < 0 || net < 0) {
+            if (error) *error = L"invalid gh billing response";
+            return false;
+        }
+        *discountAmount = discount;
+        *netAmount = net;
+        return true;
+    } catch (...) {
+        if (error) *error = L"invalid gh billing response";
+        return false;
+    }
+}
+
+static void AppendGitHubCliOrganizationBilling(const std::string& copilotBody,
+                                               AccountData* d) {
+    if (g_unloading || !d) return;
+
+    std::wstring organization = GetFirstGitHubCopilotOrganization(copilotBody);
+    if (organization.empty()) {
+        AppendExtraLine(d, L"organization: unavailable (not reported by Copilot)");
+        return;
+    }
+
+    double discountAmount = 0;
+    double netAmount = 0;
+    std::wstring error;
+    if (!RunGitHubCliBillingQuery(organization, &discountAmount, &netAmount, &error)) {
+        if (!g_unloading) {
+            AppendExtraLine(d, L"organization: unavailable (" + error + L")");
+        }
+        return;
+    }
+
+    wchar_t line[200];
+    swprintf(line, ARRAYSIZE(line),
+             L"organization: %s | $%.2f covered | $%.2f billable",
+             organization.c_str(), discountAmount, netAmount);
+    AppendExtraLine(d, line);
+}
+
 /**********************************************/
 //  Google Antigravity Local Discovery
 /**********************************************/
@@ -3180,6 +3550,18 @@ static void FetchAccount(const AccountConfig& acc, AccountData* d, int* retryAft
         d->stale = true;
         d->error = parseError.empty() ? L"unexpected response format" : parseError;
         return;
+    }
+
+    if (acc.provider == L"github-copilot") {
+        bool useGitHubCliForOrganizationBilling = false;
+        {
+            std::lock_guard<std::mutex> lk(g_settingsMutex);
+            useGitHubCliForOrganizationBilling =
+                g_settings.useGitHubCliForOrganizationBilling;
+        }
+        if (useGitHubCliForOrganizationBilling) {
+            AppendGitHubCliOrganizationBilling(r.body, &fresh);
+        }
     }
 
     fresh.stale = false;
@@ -3948,7 +4330,8 @@ static Grid BuildQuotaGrid(QuotaUiInstance& state) {
                 TranslateTransform percentOffset;
                 percentOffset.Y(textVerticalOffset(percentFontSize));
                 percent.RenderTransform(percentOffset);
-                percent.Foreground(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
+                percent.Foreground(SolidColorBrush(
+                    winrt::Windows::UI::Color{255, 0xFF, 0xFF, 0xFF}));
                 percent.Opacity(0.9);
                 percent.IsHitTestVisible(false);
                 swprintf(name, ARRAYSIZE(name), L"AiQuota_Percent_%d", (int)i);
@@ -4239,6 +4622,7 @@ static void UpdateQuotaUi(QuotaUiInstance& state) {
     bool showCodexSparkInTooltip, colorblindMode, showStaleWarning;
     BarLayout barLayout;
     BarMode barMode;
+    ColorTheme colorTheme;
     ClickAction clickAction;
     {
         std::lock_guard<std::mutex> lk(g_settingsMutex);
@@ -4247,6 +4631,7 @@ static void UpdateQuotaUi(QuotaUiInstance& state) {
         clickAction = g_settings.clickAction;
         barLayout = g_settings.barLayout;
         barMode = g_settings.barMode;
+        colorTheme = g_settings.colorTheme;
         barLength = g_settings.barLength;
         yellowThreshold = g_settings.yellowThreshold;
         orangeThreshold = g_settings.orangeThreshold;
@@ -4301,6 +4686,20 @@ static void UpdateQuotaUi(QuotaUiInstance& state) {
             bool stale = d.stale || d.lastSuccessMs == 0 || now - d.lastSuccessMs > staleAfterMs;
             bool warn = showStaleWarning && stale && !d.error.empty();
             bool accountRefreshing = refreshing && (refreshAccountIndex < 0 || refreshAccountIndex == (int)i);
+            bool lightWindowsTheme = ui.column &&
+                                     ui.column.ActualTheme() == ElementTheme::Light;
+
+            auto trackColor = TrackColor(colorTheme, lightWindowsTheme);
+            uint32_t trackColorValue = ((uint32_t)trackColor.A << 24) |
+                                       ((uint32_t)trackColor.R << 16) |
+                                       ((uint32_t)trackColor.G << 8) |
+                                       trackColor.B;
+            if (trackColorValue != ap.trackColor) {
+                for (const Border& track : ui.tracks) {
+                    if (track) track.Background(SolidColorBrush(trackColor));
+                }
+                ap.trackColor = trackColorValue;
+            }
 
             int usableBarCount = 0;
             for (const WindowUsage* usage : {&d.win5h, &d.winWeek}) {
@@ -4323,8 +4722,10 @@ static void UpdateQuotaUi(QuotaUiInstance& state) {
                 double dispPct = displayPct(wu.pct);
                 int px = dispPct > 0 ? std::clamp((int)std::lround(barLength * dispPct / 100.0), 2, barLength) : 0;
                 // Color stays keyed to actual usage so depleting quota still reds out.
-                auto c = UsageColor(wu.pct, stale, yellowThreshold, orangeThreshold, redThreshold,
-                                    colorblindMode);
+                auto c = colorTheme == ColorTheme::Monochrome
+                    ? MonochromeBarColor(lightWindowsTheme, stale || wu.pct < 0)
+                    : UsageColor(wu.pct, stale, yellowThreshold, orangeThreshold, redThreshold,
+                                 colorblindMode, lightWindowsTheme);
                 uint32_t cv = ((uint32_t)c.A << 24) | ((uint32_t)c.R << 16) |
                               ((uint32_t)c.G << 8) | c.B;
                 if (px != ap.fillPx[w] || cv != ap.fillColor[w]) {
@@ -4414,6 +4815,21 @@ static void UpdateQuotaUi(QuotaUiInstance& state) {
                 if (percentText != ap.percentText) {
                     if (ui.percent) ui.percent.Text(percentText);
                     ap.percentText = percentText;
+                }
+
+                // Both themes choose text from Windows' actual taskbar theme. The default dark
+                // palette is intentionally dark enough to keep white text readable on every fill.
+                bool useDarkText = lightWindowsTheme;
+                auto percentColor = useDarkText
+                    ? winrt::Windows::UI::Color{255, 0x20, 0x20, 0x20}
+                    : winrt::Windows::UI::Color{255, 0xFF, 0xFF, 0xFF};
+                uint32_t percentColorValue = ((uint32_t)percentColor.A << 24) |
+                                             ((uint32_t)percentColor.R << 16) |
+                                             ((uint32_t)percentColor.G << 8) |
+                                             percentColor.B;
+                if (percentColorValue != ap.percentColor) {
+                    if (ui.percent) ui.percent.Foreground(SolidColorBrush(percentColor));
+                    ap.percentColor = percentColorValue;
                 }
             }
 
@@ -4853,6 +5269,9 @@ static void LoadSettings() {
     }
     std::wstring barMode = getSettingText(L"barMode");
     s.barMode = barMode == L"remaining" ? BarMode::Remaining : BarMode::Used;
+    std::wstring colorTheme = getSettingText(L"colorTheme");
+    s.colorTheme = colorTheme == L"monochrome" ? ColorTheme::Monochrome
+                                                : ColorTheme::Default;
     int taskbarMonitorNumber = getIntSetting(L"taskbarMonitorNumber", 1);
 
     s.pollMinutes = std::clamp(pollMinutes > 0 ? pollMinutes : 10, 2, 24 * 60);
@@ -4873,6 +5292,8 @@ static void LoadSettings() {
     s.showPercentText = getBoolSetting(L"showPercentText", false);
     s.hideUnavailableBars = getBoolSetting(L"hideUnavailableBars", true);
     s.showCodexSparkInTooltip = getBoolSetting(L"showCodexSparkInTooltip", false);
+    s.useGitHubCliForOrganizationBilling =
+        getBoolSetting(L"useGitHubCliForOrganizationBilling", false);
     s.colorblindMode = getBoolSetting(L"colorblindMode", false);
     s.showStaleWarning = getBoolSetting(L"showStaleWarning", true);
     s.enableNotifications = getBoolSetting(L"enableNotifications", true);

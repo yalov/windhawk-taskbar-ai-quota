@@ -55,6 +55,8 @@ Useful settings include:
 - cloud poll interval (Antigravity polls its local server every minute)
 - taskbar monitor mode: primary, all, or specific monitor number (`1` = primary, `2+` = secondary taskbars)
 - color thresholds
+- color theme: default threshold colors or theme-aware monochrome bars
+- optional GitHub CLI organization billing totals (`discountAmount` and `netAmount`; requires `gh` authenticated as an organization administrator)
 - threshold notifications (toast when an account crosses the red threshold)
 - colorblind palette
 - stale-warning marker
@@ -63,7 +65,7 @@ Useful settings include:
 
 For Anthropic, OpenAI, and GitHub Copilot, the mod owns its OAuth credentials end to end. Tokens are stored encrypted with Windows DPAPI (current user) in the mod's own Windhawk storage; they are never written to disk in plaintext.
 
-The mod never reads or writes the OpenCode, Claude Code, or Codex credential files. Refresh tokens are used only against the provider token endpoints and are never sent as bearer tokens to the quota endpoints.
+The mod never reads or writes the OpenCode, Claude Code, or Codex credential files. Refresh tokens are used only against the provider token endpoints and are never sent as bearer tokens to the quota endpoints. If **Use GitHub CLI for organization billing** is enabled, the mod launches the installed `gh` executable for the current-month organization billing request; `gh` uses its own existing login and the mod does not read or store that token.
 
 Signing in uses public OAuth clients used by the official provider tools: PKCE for Claude Code and Codex, and GitHub's device authorization flow for Copilot. Antigravity uses only its authenticated loopback language server and stores no Google token.
 
@@ -76,3 +78,4 @@ Signing in uses public OAuth clients used by the official provider tools: PKCE f
 - OpenAI sign-in needs `localhost:1455` (or `1457`) free for the browser redirect.
 - Anthropic access tokens are short-lived but the mod refreshes them automatically; you only re-sign-in if the refresh token is revoked.
 - GitHub documents the device sign-in flow, but its personal Copilot quota endpoint is internal and may change without notice.
+- Optional GitHub organization billing requires the installed `gh` CLI to be authenticated as an administrator of the first Copilot organization returned by GitHub.
