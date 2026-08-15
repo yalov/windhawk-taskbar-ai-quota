@@ -3421,6 +3421,41 @@ static void FetchAntigravityAccount(AccountData* d) {
 //  Fetch Thread
 /**********************************************/
 
+static bool HasUsableNetworkAdapter() {
+    ULONG bufferSize = 16 * 1024;
+    for (int attempt = 0; attempt < 3 && !g_unloading; attempt++) {
+        std::vector<BYTE> buffer(bufferSize);
+        auto* addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+        ULONG result = GetAdaptersAddresses(
+            AF_UNSPEC,
+            GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                GAA_FLAG_SKIP_DNS_SERVER,
+            nullptr, addresses, &bufferSize);
+        if (result == ERROR_BUFFER_OVERFLOW && bufferSize <= 4 * 1024 * 1024) {
+            continue;
+        }
+        if (result != NO_ERROR) return false;
+
+        for (auto* adapter = addresses; adapter; adapter = adapter->Next) {
+            if (adapter->OperStatus != IfOperStatusUp ||
+                adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK ||
+                !adapter->FirstUnicastAddress) {
+                continue;
+            }
+            for (auto* address = adapter->FirstUnicastAddress; address;
+                 address = address->Next) {
+                if (address->Address.lpSockaddr &&
+                    (address->Address.lpSockaddr->sa_family == AF_INET ||
+                     address->Address.lpSockaddr->sa_family == AF_INET6)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    return false;
+}
+
 static void FetchAccount(const AccountConfig& acc, AccountData* d, int* retryAfterSec) {
     d->error.clear();
     d->retryDeadlineMs = 0;
@@ -3439,6 +3474,16 @@ static void FetchAccount(const AccountConfig& acc, AccountData* d, int* retryAft
         d->stale = true;
         d->needsLogin = true;
         d->error = L"not signed in - click to sign in";
+        return;
+    }
+
+    // Explorer and Windhawk can start before Windows has brought up a usable adapter. Avoid a
+    // doomed provider request and poll briefly until networking is initialized. This also covers
+    // the same race after resume, while still letting unsigned-in and local accounts update now.
+    if (!HasUsableNetworkAdapter()) {
+        d->stale = true;
+        d->error = L"waiting for network";
+        *retryAfterSec = 2;
         return;
     }
 
@@ -3514,6 +3559,7 @@ static void FetchAccount(const AccountConfig& acc, AccountData* d, int* retryAft
     if (!r.ok) {
         d->stale = true;
         d->error = L"network error";
+        *retryAfterSec = 15;
         return;
     }
     if (r.status == 401) {
