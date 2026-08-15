@@ -2608,16 +2608,15 @@ static bool ParseGitHubCopilotUsage(const std::string& body, AccountData* d,
                                                         : completionsUsage.detail);
         }
 
-        // Paid additional usage is separate from the user's entitlement/budget. Surface the
-        // provider's overage counter whenever the account policy permits overage, including
-        // an explicit zero so the tooltip distinguishes "allowed, unused" from "not allowed".
+        // overage_count belongs to the legacy premium-request accounting path. GitHub leaves it
+        // at zero for token-based AI-credit billing even when organization netQuantity is
+        // positive, so don't present it as authoritative for current AI-credit plans.
         if (auto premiumSnapshot = GetObj(snapshots, L"premium_interactions");
-            premiumSnapshot && GetBool(premiumSnapshot, L"overage_permitted")) {
+            !tokenBasedBilling && premiumSnapshot &&
+            GetBool(premiumSnapshot, L"overage_permitted")) {
             double overageCount = GetNum(premiumSnapshot, L"overage_count", 0);
             wchar_t line[80];
-            swprintf(line, ARRAYSIZE(line),
-                     tokenBasedBilling ? L"overage: %.0f AI credits"
-                                       : L"overage: %.0f requests",
+            swprintf(line, ARRAYSIZE(line), L"overage: %.0f requests",
                      std::max(0.0, overageCount));
             if (!d->extraLines.empty()) d->extraLines += L"\n";
             d->extraLines += line;
